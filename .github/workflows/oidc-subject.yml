@@ -1,0 +1,143 @@
+
+name: Inspect OIDC Subject
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect token claims
+        shell: bash
+        run: |
+          TOKEN=$(curl -fsSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+            | jq -r '.value')
+
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+          PAYLOAD="${PAYLOAD}$(printf '%*s' $(( (4 - ${#PAYLOAD} % 4) % 4 )) '' | tr ' ' '=')"
+
+          echo "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null \
+            | jq '{iss, sub, aud}'
+```
+
+Commit and push this workflow to `main` through your normal PR process, then run it from **Actions → Inspect OIDC Subject → Run workflow**.
+
+Copy the `sub` value from the job log.
+
+Create the matching federated credential:
+
+```powershell
+$SUBJECT = "PASTE_EXACT_SUBJECT_FROM_GITHUB"
+
+$CREDENTIAL = @{
+    name        = "github-terraform-mcp-main"
+    issuer      = "https://token.actions.githubusercontent.com"
+    subject     = $SUBJECT
+    audiences   = @("api://AzureADTokenExchange")
+}
+
+$CREDENTIAL |
+    ConvertTo-Json -Depth 5 |
+    Set-Content github-main-federation.json
+
+az ad app federated-credential create `
+    --id $APP_ID `
+    --parameters github-main-federation.json
+```
+
+## Step 2 — Create the Terraform Plan workflow
+
+Create `.github/workflows/terraform-plan.yml`:
+
+<CodeBlock language="yaml" editable>
+name: Terraform MCP - Plan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+
+      - name: Azure Login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Initialize remote backend
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -no-color
+```
+
+This workflow uses your existing `backend.tf`, which points to:
+
+```text
+sttfmcp598316
+└── tfstate
+    └── dev/network.tfstate
+```
+
+It does not run `terraform apply`.
+
+## Step 3 — Run the workflow
+
+After merging the workflow to `main`, open:
+
+**GitHub → Actions → Terraform MCP - Plan → Run workflow**
+
+Choose `main`.
+
+The workflow should authenticate to Azure, initialize the remote backend, and produce a Terraform plan.
+
+Two possible outcomes:
+
+- **Plan succeeds:** We can review the infrastructure changes.
+- **Authorization error:** We'll adjust the planning identity's permissions based on the exact error.
+
+Remember that your remote state is currently empty, so Terraform may propose creating the resources defined in `main.tf`. That is expected; a plan only previews changes.
+
+## What comes next?
+
+After the first successful plan, we'll implement the final enterprise controls:
+
+1. Pull-request Terraform planning with restricted OIDC trust.
+2. Plan review and approval.
+3. Separate deployment identity.
+4. GitHub Environment protection and approval-controlled `terraform apply`.
+
+**Let's complete the first OIDC-authenticated Terraform plan before adding anything else.**
