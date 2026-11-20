@@ -1,0 +1,7 @@
+{
+  "name": "github-terraform-mcp-pr",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:William-eng/terraform-mcp-azure-lab:pull_request",
+  "description": "Terraform plan workflow for pull requests",
+  "audiences": ["api://AzureADTokenExchange"]
+}
